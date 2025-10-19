@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGL</title>
+    <style>
+        html, body {
+            margin: 0;
+        }
+
+        canvas {
+            /* border: 1px solid blueviolet; */
+            padding: 0;
+            display: block;
+            margin: 0 auto; /* Centers horizontally */
+        }
+
+        .canvas-container {
+            display: flex;
+            justify-content: center; /* Centers horizontally */
+            align-items: center;    /* Centers vertically */
+            height: 100vh;          /* Or a specific height for the container */
+            width: 100vw;           /* Or a specific width for the container */
+        }
+    </style>
+</head>
+<body>
+    <div class="canvas-container">
+        <canvas id="canvas"></canvas>
+    </div>
+    <script defer>
+        // in the shaders, make SURE that when you type a float, you remember to add the decimal after, like 1 -> 1.0, 0 -> 0.0, or else it throws an error
+        // there will many errors with this issue ^
+
+        // seems like the shader point positions are always in clip space
+
+        // gl.ARRAY_BUFFER is *not* a type of buffer, it *is a buffer* 
+        const canvas = document.getElementById('canvas');
+        // canvas.width = 1280;
+        // canvas.height = 720;
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const gl = canvas.getContext('webgl2');
+    
+        if (!gl) {
+            alert("WebGL2 not supported");
+            throw new Error("No WebGL2 support");
+        } else {
+            console.log("WebGL Version:", gl.getParameter(gl.VERSION));
+            console.log("GLSL Version:", gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
+        }
+
+        const ext = gl.getExtension('EXT_color_buffer_float');
+        console.log("EXT_color_buffer_float:", ext);
+
+        if (!gl.getExtension('EXT_color_buffer_float')) {
+            console.error("EXT_color_buffer_float not supported — floating point FBOs will not work.");
+        }
+
+        const mouse = { x: 0, y: 0, lmb: 0, rmb: 0 };
+
+
+        function getShaderSource(id) {
+            const element = document.getElementById(id);
+            return element ? element.textContent : null;
+        }
+
+        function compileShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                const msg = gl.getShaderInfoLog(shader);
+                console.error('Shader compile error:', msg);
+                gl.deleteShader(shader);
+                throw new Error('Shader compile failed: ' + msg);
+            }
+            return shader;
+        }
+
+        function compileShader(type, src){
+            const s = gl.createShader(type);
+            gl.shaderSource(s, src);
+            gl.compileShader(s);
+            if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+                const info = gl.getShaderInfoLog(s);
+                gl.deleteShader(s);
+                throw new Error("Shader compile error: " + info);
+            }
+            return s;
+        }
+
+        function createProgram(vsSrc, fsSrc){
+            const vs = compileShader(gl.VERTEX_SHADER, vsSrc);
+            const fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
+            const p = gl.createProgram();
+            gl.attachShader(p, vs);
+            gl.attachShader(p, fs);
+            gl.linkProgram(p);
+            if(!gl.getProgramParameter(p, gl.LINK_STATUS)){
+                const info = gl.getProgramInfoLog(p);
+                gl.deleteProgram(p);
+                throw new Error("Program link error: " + info);
+            }
+            return p;
+        }
+
+        const quadVS = `#version 300 es
+            in vec2 a_pos;
+            out vec2 v_uv;
+            void main(){
+                // these uv coordinates will be passed to the compute (fragment) shader to access the each texel on the texture
+                v_uv = a_pos * 0.5 + 0.5; // converts from clip space to uv space (-1, 1 --> 0, 1)
+
+                gl_Position = vec4(a_pos, 0.0, 1.0);
+            }
+        `;
+
+        const computeFS = `#version 300 es
+            precision highp float;
+            in vec2 v_uv; // uv texel coordinates
+            uniform sampler2D u_input; // input texture
+            uniform vec2 mouse_pos; // mouse xy
+            uniform vec2 mouse_buttons;
+
+            out vec4 outColor; // color data to send to the output texture
+
+            void main(){
+                // sample neighbors (simple 2D diffusion-ish step)
+                vec2 texel = 1.0 / vec2(textureSize(u_input, 0)); // gives the width in uv coordinates of each texel (u_input = texture, 0 = levelofdetail)
+                vec4 c = texture(u_input, v_uv);
+                vec4 u = texture(u_input, v_uv + vec2(0.0, texel.y));
+                vec4 d = texture(u_input, v_uv + vec2(0.0, -texel.y));
+
+                if ((d.b == 1.0 && c.b == 1.0)) {
+                    outColor = vec4(0.0, 0.0, 1.0, 1.0);
+                } else if ((u.b == 1.0 && c.b == 0.0)) {
+                    outColor = vec4(0.0, 0.0, 1.0, 1.0); 
+                }
+
+
+                float sandCursorWidth = 25.0;
+                
+                if (mouse_buttons.x == 1.0) {
+                    if ((gl_FragCoord.x > mouse_pos.x - sandCursorWidth + 0.5 && gl_FragCoord.x < mouse_pos.x + sandCursorWidth + 0.5) && gl_FragCoord.y == (${canvas.height}.0 - mouse_pos.y) + 0.5) { // why is it x + 0.5 and not x??????
+                        outColor = vec4(0.0, 0.0, 1.0, 1.0);  
+                    }
+                }
+
+                if (mouse_buttons.y == 1.0) {
+                    if ((gl_FragCoord.x > mouse_pos.x - sandCursorWidth + 0.5 && gl_FragCoord.x < mouse_pos.x + sandCursorWidth + 0.5) && gl_FragCoord.y == (${canvas.height}.0 - mouse_pos.y) + 0.5) { // why is it x + 0.5 and not x??????
+                        outColor = vec4(0.0, 0.0, 0.0, 1.0);  
+                    }
+                }
+            }
+        `;
+
+        const displayFS = `#version 300 es
+            #define PI 3.141592653589793238462643383279
+            precision highp float;
+            in vec2 v_uv;
+            uniform sampler2D u_tex;
+            uniform float u_time;
+
+            out vec4 outColor;
+
+            void main(){
+                // sample neighbors (simple 2D diffusion-ish step)
+                vec2 texel = 1.0 / vec2(textureSize(u_tex, 0)); // gives the width in uv coordinates of each texel (u_input = texture, 0 = levelofdetail)
+                vec4 c = texture(u_tex, v_uv);
+                vec4 l = texture(u_tex, v_uv + vec2(-texel.x, 0.0)); // dont really need left
+                vec4 r = texture(u_tex, v_uv + vec2(texel.x, 0.0)); // dont really need right
+                vec4 u = texture(u_tex, v_uv + vec2(0.0, texel.y));
+                vec4 d = texture(u_tex, v_uv + vec2(0.0, -texel.y));
+
+                float intensity = 1.0;
+
+                if ((l.b == 0.0 || r.b == 0.0 || u.b == 0.0 || d.b == 0.0) && c.b == 1.0) {
+                    outColor = vec4(0.0, 1.0, 1.0, 1.0);
+                } else if ((l.b == 0.0 || r.b == 0.0 || u.b == 0.0 || d.b == 0.0) && c.b == 0.0) {
+                    outColor = vec4(sin(u_time + v_uv.x / v_uv.y), 0.5, 0.5, 1.0);
+                } else {
+                    outColor = vec4(0.0, 0.0, 0.0, 1.0); 
+                }
+            }
+        `;
+
+        const computeProgram = createProgram(quadVS, computeFS);
+        const displayProgram = createProgram(quadVS, displayFS);
+        
+
+        // below is the vertex array buffer stuff for the quad
+        const quadVAO = gl.createVertexArray(); // vertex array to store our square/quad/box
+        gl.bindVertexArray(quadVAO); // binds quadVAO to the buffer (which buffer? not sure)
+        const posBuffer = gl.createBuffer(); // create a buffer to store positions
+        gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer); // (which buffer? this buffer!)
+        // two triangles (a_pos in clip space)
+        const posData = new Float32Array([
+            // triangle one
+            -1, -1,  
+            1, -1,  
+            -1, 1,
+            // triangle two
+            -1, 1,   
+            1, -1,   
+            1, 1
+            // all together makes a quad
+        ]);
+        gl.bufferData(gl.ARRAY_BUFFER, posData, gl.STATIC_DRAW); // add the quad (2 triangles) to the buffer, and the gl.STATIC_DRAW means the data will not change frequently, and that it will be used a lot
+        const aPosLocation = gl.getAttribLocation(computeProgram, "a_pos");
+        gl.enableVertexAttribArray(aPosLocation); // enable the vertex attribute array at the specified location
+        gl.vertexAttribPointer(aPosLocation, 2, gl.FLOAT, false, 0, 0); // specify how to pull data from the buffer into the attribute
+        gl.bindVertexArray(null); // unbind quadVAO
+
+
+
+        const TEXTURE_WIDTH = canvas.width;
+        const TEXTURE_HEIGHT = canvas.height;
+
+        function createFloatTextureAndFBO(){
+            const tex = gl.createTexture(); // obvious
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            // use RGBA32F internal format (WebGL2)
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, TEXTURE_WIDTH, TEXTURE_HEIGHT, 0, gl.RGBA, gl.FLOAT, null);
+
+            // NEAREST is safest for float textures; linear filtering may need OES_texture_float_linear (i dont understand the filtering i just copy/pasted)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+            const fbo = gl.createFramebuffer(); // texture frame buffer
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); // bind fbo as the current frame buffer, so that all draw calls are directed towards it
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0); // target = gl.FRAMEBUFFER, attachment point = gl.COLOR_ATTACHMENT0, type to be attatched = gl.TEXTURE_2D
+            const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+            if (status !== gl.FRAMEBUFFER_COMPLETE) { // check if something went wrong
+                console.error("Framebuffer not complete:", status);
+            }
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null); // unbind fbo
+            gl.bindTexture(gl.TEXTURE_2D, null); // unbind tex
+            return { tex, fbo };
+        }
+
+        const A = createFloatTextureAndFBO();
+        const B = createFloatTextureAndFBO();
+
+
+
+        // initialize A with some pattern
+        gl.bindTexture(gl.TEXTURE_2D, A.tex);
+        const initData = new Float32Array(TEXTURE_WIDTH * TEXTURE_HEIGHT * 4);
+        for (let y = 0; y < TEXTURE_HEIGHT; ++y) {
+            for (let x = 0; x < TEXTURE_WIDTH; ++x) {
+                const i = (y * TEXTURE_WIDTH + x) * 4;
+
+                d = Math.random() < 0.0 ? 1.0 : 0.0; // random guess, if more than half, red, if less than half, black
+                // d = y < Math.floor(TEXTURE_HEIGHT/2) ? 1.0 : 0.0; // random guess, if more than half, red, if less than half, black
+
+                initData[i+0] = 0.0; // r
+                initData[i+1] = 0.0; // g
+                initData[i+2] = d; // b
+                initData[i+3] = 1.0; // a
+            }
+        }
+
+        // just look this part up, it adds the initData to the texture
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TEXTURE_WIDTH, TEXTURE_HEIGHT, gl.RGBA, gl.FLOAT, initData);
+        gl.bindTexture(gl.TEXTURE_2D, null); // unbind A.tex
+
+
+
+        let read = A;
+        let write = B;
+
+        function computeStep() {
+            // bind target framebuffer and viewport
+            gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
+            gl.viewport(0,0,TEXTURE_WIDTH,TEXTURE_HEIGHT);
+
+            gl.useProgram(computeProgram);
+            gl.bindVertexArray(quadVAO);
+
+            // bind input texture to unit 0
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, read.tex);
+
+            gl.uniform1i(gl.getUniformLocation(computeProgram, "u_input"), 0); // add the uniform
+            gl.uniform2f(gl.getUniformLocation(computeProgram, "mouse_pos"), mouse.x, mouse.y);
+            gl.uniform2f(gl.getUniformLocation(computeProgram, "mouse_buttons"), mouse.lmb, mouse.rmb);
+
+            // disable blending, depth test
+            gl.disable(gl.BLEND);
+            gl.disable(gl.DEPTH_TEST);
+
+            // draw fullscreen quad = running the fragment "compute" for every pixel
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+            // unbind
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.bindVertexArray(null);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+            // swap read/write for ping-pong double buffer stuff
+            const tmp = read; read = write; write = tmp;
+        }
+
+        function render() { // do the actual drawing here
+            gl.viewport(0,0,canvas.width, canvas.height);
+
+            // set program and quad
+            gl.useProgram(displayProgram);
+            gl.bindVertexArray(quadVAO);
+            
+            // set texture to 0
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, read.tex);
+            
+            // set uniform
+            gl.uniform1i(gl.getUniformLocation(displayProgram, "u_tex"), 0);
+            gl.uniform1f(gl.getUniformLocation(displayProgram, "u_time"), performance.now()/1000);
+            
+            // draw quad
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            
+            // unbind
+            gl.bindVertexArray(null);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+
+
+        
+        function mousePos(event) {
+            let rect = canvas.getBoundingClientRect();
+            mouse.x = event.clientX - rect.left;
+            mouse.y = event.clientY - rect.top;
+        }
+        function mouseDownHandler(event) {
+            if (event.button == 0) {
+                mouse.lmb = 1;
+            }
+            if (event.button == 2) {
+                mouse.rmb = 1;
+            }
+        }
+        function mouseUpHandler(event) {
+            if (event.button == 0) {
+                mouse.lmb = 0;
+            }
+            if (event.button == 2) {
+                mouse.rmb = 0;
+            }
+        }        
+        
+        
+        document.addEventListener('mousemove', mousePos);
+        document.addEventListener('mousedown', mouseDownHandler);
+        document.addEventListener('mouseup', mouseUpHandler);
+        document.addEventListener('contextmenu', (event) => { event.preventDefault() });
+
+        let lastTime = 0;
+        let fps = 0;
+        setInterval(() => {
+            let steps = 7;
+
+            for (let i = 0; i < steps; i++) {
+                computeStep();
+            }
+            
+            render();
+
+            
+            let time = performance.now();
+            const delta = time - lastTime;
+            lastTime = time;
+            
+            fps = 1000 / delta;
+            console.log(fps);
+        }, 1000/60);
+
+    </script>
+</body>
+</html>
